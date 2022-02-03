@@ -19,6 +19,7 @@ PYTEST_TO_TESTRAIL_STATUS = {
     "passed": TESTRAIL_TEST_STATUS["passed"],
     "failed": TESTRAIL_TEST_STATUS["failed"],
     "skipped": TESTRAIL_TEST_STATUS["blocked"],
+    "blocked": TESTRAIL_TEST_STATUS["blocked"],
 }
 
 DT_FORMAT = '%d-%m-%Y %H:%M:%S'
@@ -32,6 +33,7 @@ CLOSE_TESTPLAN_URL = 'close_plan/{}'
 GET_TESTRUN_URL = 'get_run/{}'
 GET_TESTPLAN_URL = 'get_plan/{}'
 GET_TESTS_URL = 'get_tests/{}'
+GET_STATUSES_URL = 'get_statuses'
 
 COMMENT_SIZE_LIMIT = 4000
 
@@ -210,21 +212,34 @@ class PyTestRailPlugin(object):
         """ Collect result and associated testcases (TestRail) of an execution """
         outcome = yield
         rep = outcome.get_result()
+        status = get_test_outcome(rep.outcome)
+        comment = rep.longrepr
+
+        if item.get_closest_marker(TESTRAIL_PREFIX) and item.get_closest_marker('skip') :
+            marker = item.get_closest_marker('skip')
+            if len(marker.kwargs) > 0 and marker.kwargs.get('block'):
+                status = get_test_outcome('blocked')
+            else:
+                status = next(
+                    iter([item["id"] for item in self.get_testrail_statuses() if item["label"] == "Skipped"]),
+                    get_test_outcome('blocked'))
+            comment = marker.args[0] if len(marker.args) > 0 else marker.kwargs.get('reason')
+
         defectids = None
         if 'callspec' in dir(item):
             test_parametrize = item.callspec.params
         else:
             test_parametrize = None
-        comment = rep.longrepr
+
         if item.get_closest_marker(TESTRAIL_DEFECTS_PREFIX):
             defectids = item.get_closest_marker(TESTRAIL_DEFECTS_PREFIX).kwargs.get('defect_ids')
         if item.get_closest_marker(TESTRAIL_PREFIX):
             testcaseids = item.get_closest_marker(TESTRAIL_PREFIX).kwargs.get('ids')
-            if rep.when == 'call' and testcaseids:
+            if (rep.when == 'call' or (item.get_closest_marker('skip') and rep.when == 'setup')) and testcaseids:
                 if defectids:
                     self.add_result(
                         clean_test_ids(testcaseids),
-                        get_test_outcome(outcome.get_result().outcome),
+                        status,
                         comment=comment,
                         duration=rep.duration,
                         defects=str(clean_test_defects(defectids)).replace('[', '').replace(']', '').replace("'", ''),
@@ -233,7 +248,7 @@ class PyTestRailPlugin(object):
                 else:
                     self.add_result(
                         clean_test_ids(testcaseids),
-                        get_test_outcome(outcome.get_result().outcome),
+                        status,
                         comment=comment,
                         duration=rep.duration,
                         test_parametrize=test_parametrize
@@ -491,4 +506,19 @@ class PyTestRailPlugin(object):
         if error:
             print('[{}] Failed to get tests: "{}"'.format(TESTRAIL_PREFIX, error))
             return None
+        return response
+
+    def get_testrail_statuses(self):
+        """
+        :return: the list of statuses
+        """
+        response = self.client.send_get(
+            GET_STATUSES_URL,
+            cert_check=self.cert_check
+        )
+        error = self.client.get_error(response)
+        if error:
+            print('[{}] Failed to retrieve statues: "{}"'.format(TESTRAIL_PREFIX, error))
+            return False
+
         return response
